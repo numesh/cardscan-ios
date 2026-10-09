@@ -9,9 +9,9 @@ import SwiftUI
 
 @main
 struct CardScanSampleApp: App {
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
-        }
+  var body: some Scene {
+    WindowGroup {
+      ContentView()
     }
+  }
 }

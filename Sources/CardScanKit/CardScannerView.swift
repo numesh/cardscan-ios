@@ -1,188 +1,208 @@
 #if os(iOS)
-import SwiftUI
+  import SwiftUI
 
-/// Reusable library screen. The host decides how to present and dismiss it.
-public struct CardScannerView: View {
+  /// Optional replacements receive state/actions. Return AnyView to use host assets or typography.
+  public struct ScannerSlots {
+    public var header: ((ScannerState, @escaping (ScannerAction) -> Void) -> AnyView)?
+    public var controls: ((ScannerState, @escaping (ScannerAction) -> Void) -> AnyView)?
+    public var status: ((ScannerState) -> AnyView)?
+    public var detectedValues: ((ScannerState) -> AnyView)?
+    public init() {}
+  }
+
+  /// Host owns presentation and dismisses after the terminal callback. Configuration is a session snapshot.
+  public struct CardScannerView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @ScaledMetric private var fontScale: CGFloat = 1
     @State private var model: ScannerModel
-    private let onCancel: () -> Void
+    private let slots: ScannerSlots
+    private var c: CardScannerConfiguration { model.configuration }
+    private var a: ScannerAppearance { c.appearance }
 
-    public init(onComplete: @escaping (CardScanResult) -> Void, onCancel: @escaping () -> Void) {
-        _model = State(initialValue: ScannerModel(onComplete: onComplete))
-        self.onCancel = onCancel
+    public init(
+      configuration: CardScannerConfiguration = CardScannerConfiguration(),
+      slots: ScannerSlots = ScannerSlots(),
+      additionalValidator: ((CardScanResult) -> Bool)? = nil,
+      onProgress: @escaping (ScannerProgress) -> Void = { _ in },
+      onOutcome: @escaping (ScanOutcome) -> Void
+    ) {
+      self.slots = slots
+      _model = State(
+        initialValue: ScannerModel(
+          configuration: configuration, validator: additionalValidator, onOutcome: onOutcome,
+          onProgress: onProgress))
     }
-
+    /// Source-compatible v1 entry point. Non-completion outcomes map to onCancel.
+    public init(
+      configuration: CardScannerConfiguration = CardScannerConfiguration(),
+      onComplete: @escaping (CardScanResult) -> Void, onCancel: @escaping () -> Void
+    ) {
+      self.init(
+        configuration: configuration,
+        onOutcome: { outcome in
+          if case .completed(let result) = outcome { onComplete(result) } else { onCancel() }
+        })
+    }
     public var body: some View {
-        GeometryReader { geometry in
-            let size = geometry.size
-            let guide = model.guide(in: size)
-            ZStack(alignment: .topLeading) {
-                Color.black
-                CameraPreview(camera: model.camera, onFocus: model.focus(at:))
-                    .frame(width: size.width, height: size.height)
-                CameraShade(guide: guide, size: size)
-                    .allowsHitTesting(false)
-                GuideCorners(guide: guide)
-                    .allowsHitTesting(false)
-
-                HStack(spacing: 8) {
-                    Button(action: onCancel) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 22, weight: .medium))
-                            .frame(width: 48, height: 48)
-                    }
-                    .accessibilityLabel("Close scanner")
-                    Text("Scan card").font(.system(size: 20, weight: .semibold))
-                    Spacer()
+      GeometryReader { geometry in
+        let guide = model.guide(in: geometry.size)
+        ZStack(alignment: .topLeading) {
+          CameraPreview(camera: model.camera, onFocus: model.focus(at:))
+            .frame(width: geometry.size.width, height: geometry.size.height)
+          Canvas { context, size in
+            var shade = Path(CGRect(origin: .zero, size: size))
+            shade.addRect(guide)
+            context.fill(
+              shade, with: .color(color(a.backgroundColor).opacity(a.shadeOpacity)),
+              style: FillStyle(eoFill: true))
+            if a.guideVisible {
+              if a.guideStyle == .outline {
+                context.stroke(
+                  Path(roundedRect: guide, cornerRadius: a.cornerRadius),
+                  with: .color(color(a.guideColor)), lineWidth: a.guideStroke)
+              } else {
+                let length = min(28, guide.width / 4, guide.height / 4)
+                var path = Path()
+                for (point, dx, dy) in [
+                  (CGPoint(x: guide.minX, y: guide.minY), 1.0, 1.0),
+                  (CGPoint(x: guide.maxX, y: guide.minY), -1.0, 1.0),
+                  (CGPoint(x: guide.minX, y: guide.maxY), 1.0, -1.0),
+                  (CGPoint(x: guide.maxX, y: guide.maxY), -1.0, -1.0),
+                ] {
+                  path.move(to: CGPoint(x: point.x + length * dx, y: point.y))
+                  path.addLine(to: point)
+                  path.addLine(to: CGPoint(x: point.x, y: point.y + length * dy))
                 }
-                .foregroundStyle(.white)
-                .padding(.leading, 8)
-                .frame(height: 52)
-
-                Text("Position your card number and expiry date\ninside the frame.")
-                    .font(.system(size: 15))
-                    .lineSpacing(3)
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                    .frame(width: size.width - 32)
-                    .position(x: size.width / 2, y: 90)
-
-                if let number = model.state.numberPreview {
-                    Text(number)
-                        .font(.system(size: 17, weight: .semibold, design: .monospaced))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                        .foregroundStyle(.white)
-                        .frame(width: size.width - 80, height: 44)
-                        .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 10))
-                        .privacySensitive()
-                        .position(x: size.width / 2, y: guide.maxY - 80)
-                        .accessibilityLabel("Card number detected")
-                }
-                if let expiry = model.state.expiryPreview {
-                    Text("EXP \(expiry)")
-                        .font(.system(size: 16, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white)
-                        .frame(width: 120, height: 40)
-                        .background(model.state.expiryPreviewInvalid ? Color.red : Color.black.opacity(0.85),
-                                    in: RoundedRectangle(cornerRadius: 10))
-                        .privacySensitive()
-                        .position(x: 100, y: guide.maxY - 30)
-                }
-
-                Text(model.state.status)
-                    .font(.system(size: 15))
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                    .frame(width: size.width - 48)
-                    .frame(minHeight: 44)
-                    .padding(.horizontal, 8)
-                    .background(model.state.warningVisible ? Color(red: 0.68, green: 0.14, blue: 0.14) : .clear,
-                                in: RoundedRectangle(cornerRadius: 10))
-                    .position(x: size.width / 2, y: guide.maxY + 38)
-                    .accessibilityAddTraits(model.state.warningVisible ? .updatesFrequently : [])
-
-                if let point = model.state.focusPoint {
-                    Circle()
-                        .stroke(Color(red: 1, green: 0.78, blue: 0.24), lineWidth: 2)
-                        .frame(width: 48, height: 48)
-                        .overlay(Image(systemName: "plus")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Color(red: 1, green: 0.78, blue: 0.24)))
-                        .position(point)
-                        .allowsHitTesting(false)
-                }
-
-                Button { model.toggleTorch() } label: {
-                    Image(systemName: model.state.torchEnabled ? "flashlight.on.fill" : "flashlight.off.fill")
-                        .font(.system(size: 28, weight: .light))
-                        .frame(width: 72, height: 72)
-                        .background(.white.opacity(model.state.torchEnabled ? 0.27 : 0.13), in: Circle())
-                        .overlay(Circle().stroke(.white.opacity(0.45), lineWidth: 2))
-                }
-                .accessibilityLabel(model.state.torchEnabled ? "Turn torch off" : "Turn torch on")
-                .foregroundStyle(.white)
-                .position(x: size.width / 2, y: size.height - 164)
-
-                Button(action: onCancel) {
-                    Text("Enter details manually")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 52)
-                        .overlay(RoundedRectangle(cornerRadius: 26).stroke(.white, lineWidth: 2))
-                }
-                .padding(.horizontal, 16)
-                .position(x: size.width / 2, y: size.height - 90)
-
-                HStack(spacing: 7) {
-                    Image(systemName: "shield.lefthalf.filled")
-                        .font(.system(size: 17))
-                    Text("Your card image is not saved.")
-                        .font(.system(size: 12))
-                }
-                .foregroundStyle(Color(red: 0.86, green: 0.89, blue: 0.93))
-                .position(x: size.width / 2, y: size.height - 27)
+                context.stroke(path, with: .color(color(a.guideColor)), lineWidth: a.guideStroke)
+              }
             }
-            .frame(width: size.width, height: size.height)
-            .background(Color.black)
-            .onAppear {
-                model.updatePreviewSize(size)
-                Task { await model.start() }
+          }.allowsHitTesting(false)
+          VStack(spacing: a.spacing) {
+            if let header = slots.header {
+              header(model.state, model.send)
+            } else {
+              HStack {
+                if c.controls.closeVisible { button(.close, icon: a.closeIcon, action: .close) }
+                Text(c.text(.title)).font(scaledFont(a.titleSize)).foregroundStyle(
+                  color(a.textColor))
+                Spacer()
+              }
+              Text(c.text(.instructions)).font(scaledFont(a.bodySize)).foregroundStyle(
+                color(a.textColor)
+              ).multilineTextAlignment(.center)
             }
-            .onChange(of: size) { _, newSize in model.updatePreviewSize(newSize) }
-            .onDisappear { model.stop() }
-        }
-        .background(Color.black.ignoresSafeArea())
-        .preferredColorScheme(.dark)
-        .overlay { if scenePhase != .active { Color.black.ignoresSafeArea() } }
-    }
-}
-
-private struct CameraShade: View {
-    let guide: CGRect
-    let size: CGSize
-
-    var body: some View {
-        Canvas { context, _ in
-            let shade = Color.black.opacity(0.67)
-            func fill(_ rect: CGRect, _ color: Color) {
-                guard rect.width > 0, rect.height > 0 else { return }
-                context.fill(Path(rect), with: .color(color))
+            if c.controls.placement == .top { controls }
+            Spacer(minLength: 0)
+          }.padding(a.spacing)
+          VStack(alignment: .center, spacing: 6) {
+            if let values = slots.detectedValues {
+              values(model.state)
+            } else {
+              if let number = model.state.numberPreview { chip(number, invalid: false) }
+              if a.expiryPreviewVisible, let expiry = model.state.expiryPreview {
+                chip(
+                  c.text(.expiryPrefix) + " " + expiry, invalid: model.state.expiryPreviewInvalid)
+              }
             }
-            fill(CGRect(x: 0, y: 0, width: size.width, height: guide.minY), shade)
-            fill(CGRect(x: 0, y: guide.maxY, width: size.width, height: size.height - guide.maxY), shade)
-            fill(CGRect(x: 0, y: guide.minY, width: guide.minX, height: guide.height), shade)
-            fill(CGRect(x: guide.maxX, y: guide.minY, width: size.width - guide.maxX, height: guide.height), shade)
-            fill(CGRect(x: 0, y: 0, width: size.width, height: guide.minY - 28), .black)
-            fill(CGRect(x: 0, y: guide.maxY + 60, width: size.width,
-                        height: size.height - guide.maxY - 60), .black)
+          }.padding(.horizontal, a.spacing).frame(width: geometry.size.width).offset(
+            y: max(guide.minY, guide.maxY - 104))
+          VStack {
+            if let status = slots.status {
+              status(model.state)
+            } else {
+              Text(c.text(model.state.message)).font(scaledFont(a.bodySize)).foregroundStyle(
+                color(a.textColor)
+              )
+              .multilineTextAlignment(.center).padding(8)
+              .frame(maxWidth: .infinity)
+              .background(
+                color(
+                  model.state.warningVisible
+                    ? a.warningColor
+                    : model.state.message == .success ? a.successColor : a.backgroundColor),
+                in: RoundedRectangle(cornerRadius: a.cornerRadius))
+            }
+          }.padding(.horizontal, a.spacing).frame(width: geometry.size.width).offset(
+            y: guide.maxY + 8)
+          VStack(spacing: 8) {
+            Spacer()
+            if c.controls.placement == .bottom { controls }
+            if model.state.readyToConfirm { button(.confirm, action: .confirm) }
+            if c.controls.manualEntryVisible {
+              button(.manual, icon: a.manualIcon, action: .manualEntry, showLabel: true)
+            }
+            if a.privacyVisible {
+              Label(c.text(.privacy), systemImage: a.privacyIcon).font(.caption).foregroundStyle(
+                color(a.textColor))
+            }
+          }.padding(a.spacing).frame(width: geometry.size.width, height: geometry.size.height)
+          if c.controls.focusMarkerVisible, let point = model.state.focusPoint {
+            Circle().stroke(color(a.focusColor), lineWidth: 2).frame(width: 48, height: 48)
+              .position(point).allowsHitTesting(false)
+          }
         }
+        .background(color(a.backgroundColor))
+        .onAppear { model.updatePreviewSize(geometry.size) }
+        .onChange(of: geometry.size) { _, size in model.updatePreviewSize(size) }
+      }
+      .background(color(a.backgroundColor).ignoresSafeArea())
+      .task { await model.start() }
+      .onChange(of: scenePhase) { _, phase in
+        if phase == .active { Task { await model.start() } } else { model.pause() }
+      }
+      .onDisappear { model.stop() }
+      .overlay { if scenePhase != .active { Color.black.ignoresSafeArea() } }
     }
-}
-
-private struct GuideCorners: View {
-    let guide: CGRect
-
-    var body: some View {
-        Canvas { context, _ in
-            let length: CGFloat = 28
-            var path = Path()
-            path.move(to: CGPoint(x: guide.minX + length, y: guide.minY))
-            path.addLine(to: CGPoint(x: guide.minX, y: guide.minY))
-            path.addLine(to: CGPoint(x: guide.minX, y: guide.minY + length))
-            path.move(to: CGPoint(x: guide.maxX - length, y: guide.minY))
-            path.addLine(to: CGPoint(x: guide.maxX, y: guide.minY))
-            path.addLine(to: CGPoint(x: guide.maxX, y: guide.minY + length))
-            path.move(to: CGPoint(x: guide.minX + length, y: guide.maxY))
-            path.addLine(to: CGPoint(x: guide.minX, y: guide.maxY))
-            path.addLine(to: CGPoint(x: guide.minX, y: guide.maxY - length))
-            path.move(to: CGPoint(x: guide.maxX - length, y: guide.maxY))
-            path.addLine(to: CGPoint(x: guide.maxX, y: guide.maxY))
-            path.addLine(to: CGPoint(x: guide.maxX, y: guide.maxY - length))
-            context.stroke(path, with: .color(Color(red: 1, green: 0.84, blue: 0.13)),
-                           style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+    @ViewBuilder private var controls: some View {
+      if let custom = slots.controls {
+        custom(model.state, model.send)
+      } else {
+        HStack(spacing: a.spacing) {
+          if c.controls.torchVisible
+            && (!c.controls.hideTorchWhenUnavailable || model.state.torchAvailable)
+          {
+            button(
+              model.state.torchEnabled ? .torchOff : .torchOn,
+              icon: model.state.torchEnabled ? a.torchOnIcon : a.torchOffIcon, action: .toggleTorch,
+              large: true)
+          }
+          if c.controls.retryVisible { button(.retry, action: .retry) }
+          if c.controls.zoomVisible {
+            button(.zoomOut, icon: "minus", action: .zoomOut)
+            button(.zoomIn, icon: "plus", action: .zoomIn)
+          }
         }
+      }
     }
-}
+    private func button(
+      _ key: ScannerMessage, icon: String? = nil, action: ScannerAction, showLabel: Bool = false,
+      large: Bool = false
+    ) -> some View {
+      Button {
+        model.send(action)
+      } label: {
+        HStack {
+          if let icon { Image(systemName: icon).font(.system(size: a.iconSize)) }
+          if icon == nil || showLabel { Text(c.text(key)).font(scaledFont(a.buttonTextSize)) }
+        }.foregroundStyle(color(a.textColor)).padding(8)
+          .frame(minWidth: large ? a.buttonSize : 44, minHeight: large ? a.buttonSize : 44)
+          .background(color(a.buttonColor), in: RoundedRectangle(cornerRadius: a.cornerRadius))
+      }.accessibilityLabel(c.text(key))
+    }
+    private func chip(_ value: String, invalid: Bool) -> some View {
+      Text(value).font(scaledFont(a.previewSize)).foregroundStyle(color(a.textColor)).padding(6)
+        .background(
+          color(invalid ? a.warningColor : a.previewColor),
+          in: RoundedRectangle(cornerRadius: a.cornerRadius)
+        ).privacySensitive()
+    }
+    private func scaledFont(_ size: CGFloat) -> Font {
+      .system(size: size * fontScale)
+    }
+    private func color(_ argb: UInt32) -> Color {
+      Color(
+        .sRGB, red: Double((argb >> 16) & 255) / 255, green: Double((argb >> 8) & 255) / 255,
+        blue: Double(argb & 255) / 255, opacity: Double((argb >> 24) & 255) / 255)
+    }
+  }
 #endif
