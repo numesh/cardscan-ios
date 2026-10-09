@@ -1,0 +1,19 @@
+name: iOS CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Swift package
+        run: swift test
+      - name: Build sample app
+        run: xcodebuild -project CardScanSample.xcodeproj -scheme CardScanSample -configuration Debug -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
