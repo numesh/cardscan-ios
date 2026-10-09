@@ -33,8 +33,11 @@
       configuration: CardScannerConfiguration, validator: ((CardScanResult) -> Bool)?,
       onOutcome: @escaping (ScanOutcome) -> Void, onProgress: @escaping (ScannerProgress) -> Void
     ) {
-      self.configuration = configuration
-      self.engine = try? ScanEngine(config: configuration, validator: validator)
+      let validatedEngine = try? ScanEngine(config: configuration, validator: validator)
+      self.engine = validatedEngine
+      // SwiftUI can render before start() delivers invalidConfiguration. Keep that first
+      // layout safe even when the supplied geometry or typography contains invalid values.
+      self.configuration = validatedEngine?.config ?? .balanced
       self.onOutcome = onOutcome
       self.onProgress = onProgress
     }
